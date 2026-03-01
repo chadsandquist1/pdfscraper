@@ -38,8 +38,7 @@ with URLS_FILE.open() as fh:
 
 # Normalize: plain strings become {"url": "..."}, objects are passed through
 source_urls: list[dict] = [
-    entry if isinstance(entry, dict) else {"url": entry}
-    for entry in _raw_urls
+    entry if isinstance(entry, dict) else {"url": entry} for entry in _raw_urls
 ]
 
 OUTPUT_DIR = Path(config.get("output_dir", "downloaded"))
@@ -99,7 +98,9 @@ def fetch_page_playwright(url: str) -> BeautifulSoup | None:
         from playwright_stealth import Stealth
     except ImportError as exc:
         print(f"    [WARN] Missing dependency: {exc}")
-        print("           Run: pip install playwright playwright-stealth && playwright install chromium")
+        print(
+            "           Run: pip install playwright playwright-stealth && playwright install chromium"
+        )
         return None
     try:
         with Stealth().use_sync(sync_playwright()) as p:
@@ -107,7 +108,12 @@ def fetch_page_playwright(url: str) -> BeautifulSoup | None:
             context = browser.new_context(user_agent=USER_AGENT)
             page = context.new_page()
             page.goto(url, wait_until="load", timeout=30_000)
-            page.wait_for_timeout(3_000)  # allow JS to finish rendering
+            # Wait for the SPA to render links (hash-fragment routers make API
+            # calls after "load", so a flat wait is unreliable).
+            try:
+                page.wait_for_selector("a[href]", timeout=15_000)
+            except Exception:
+                pass  # no links within 15 s — last/empty page, proceed anyway
             html = page.content()
             browser.close()
         return BeautifulSoup(html, "lxml")
@@ -126,7 +132,7 @@ def fetch_page_auto(url: str) -> BeautifulSoup | None:
     if soup is None:
         return None
     if not soup.find("a", href=True):
-        print(f"    [INFO] No links via requests — retrying with Playwright...")
+        print("    [INFO] No links via requests — retrying with Playwright...")
         pw_soup = fetch_page_playwright(url)
         if pw_soup is not None:
             return pw_soup
@@ -171,6 +177,7 @@ def output_path_for(pdf_url: str) -> Path:
 # ---------------------------------------------------------------------------
 # Download registry  (downloaded.json)
 # ---------------------------------------------------------------------------
+
 
 def load_registry() -> dict:
     """Load the registry from disk. Returns {domain: {url: entry}}."""
@@ -228,7 +235,9 @@ def download_pdf(pdf_url: str, registry: dict) -> str:
         local_filename = str(dest.relative_to(OUTPUT_DIR))
         registry.setdefault(domain, {})[pdf_url] = {
             "url": pdf_url,
-            "date_downloaded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "date_downloaded": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "local_filename": local_filename,
         }
         save_registry(registry)
@@ -296,14 +305,16 @@ def scrape_seed(entry: dict, registry: dict) -> dict[str, int]:
     domain = parse_domain(seed_url)
     counts = {"downloaded": 0, "skipped": 0, "failed": 0}
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Seed URL : {seed_url}")
     print(f"Domain   : {domain}")
     if pagination:
-        print(f"Pagination: {pagination['type']}, start page {pagination.get('start_page', 1)}")
+        print(
+            f"Pagination: {pagination['type']}, start page {pagination.get('start_page', 1)}"
+        )
     elif RESTRICT_TO_SEED_PATH:
         print(f"Path scope: {parse_path_prefix(seed_url)}*")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     if pagination:
         # --- Paginated SPA ---
@@ -320,7 +331,9 @@ def scrape_seed(entry: dict, registry: dict) -> dict[str, int]:
             return counts
 
         seed_pdfs, seed_pages = collect_links(soup, seed_url)
-        print(f"  Seed page  -> {len(seed_pdfs)} PDF link(s), {len(seed_pages)} page link(s)")
+        print(
+            f"  Seed page  -> {len(seed_pdfs)} PDF link(s), {len(seed_pages)} page link(s)"
+        )
 
         def should_follow(url: str) -> bool:
             if parse_domain(url) != domain:
@@ -368,7 +381,9 @@ def main() -> None:
     print(f"  Source URLs  : {URLS_FILE} ({len(source_urls)} URL(s))")
     print(f"  Output dir   : {OUTPUT_DIR}")
     total_entries = sum(len(v) for v in registry.values())
-    print(f"  Registry     : {REGISTRY_FILE} ({len(registry)} domain(s), {total_entries} entries)")
+    print(
+        f"  Registry     : {REGISTRY_FILE} ({len(registry)} domain(s), {total_entries} entries)"
+    )
     print(f"  Delay        : {DELAY}s between requests")
     print(f"  Skip existing: {SKIP_EXISTING}")
 
@@ -376,11 +391,14 @@ def main() -> None:
 
     totals = {"downloaded": 0, "skipped": 0, "failed": 0}
     for entry in source_urls:
+        if entry.get("skip", False):
+            print(f"\n[SKIP] {entry['url']}")
+            continue
         result = scrape_seed(entry, registry)
         for key in totals:
             totals[key] += result[key]
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("Run complete.")
     print(f"  Downloaded : {totals['downloaded']}")
     print(f"  Skipped    : {totals['skipped']}")

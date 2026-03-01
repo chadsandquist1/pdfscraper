@@ -1,11 +1,19 @@
 [
-  "https://insurance.delaware.gov/information/bulletins/",
+  {
+    "url": "https://insurance.delaware.gov/information/bulletins/",
+    "skip": true
+  },
   {
     "url": "https://mn.gov/commerce/insurance/industry/bulletins/",
+    "skip": false,
     "pagination": {
       "type": "hash_fragment",
       "pattern": "#/list/appId/2/filterType//filterValue//page/{page}/sort/Date/order/ascending",
       "start_page": 1
     }
+  },
+  {
+    "url": "https://portal.ct.gov/cid/department-resources/bulletins",
+    "skip": false
   }
 ]
