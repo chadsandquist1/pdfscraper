@@ -8,9 +8,9 @@ seed URLs are read from source_urls.json.
 """
 
 import json
-import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 
 CONFIG_FILE = Path("config.json")
 URLS_FILE = Path("source_urls.json")
+REGISTRY_FILE = Path("downloaded.json")
 
 for required in (CONFIG_FILE, URLS_FILE):
     if not required.exists():
@@ -115,15 +116,51 @@ def output_path_for(pdf_url: str) -> Path:
     return OUTPUT_DIR / domain / rel_path
 
 
-def download_pdf(pdf_url: str) -> str:
+# ---------------------------------------------------------------------------
+# Download registry  (downloaded.json)
+# ---------------------------------------------------------------------------
+
+def load_registry() -> dict:
+    """Load the download registry from disk. Returns a dict keyed by URL."""
+    if REGISTRY_FILE.exists():
+        with REGISTRY_FILE.open() as fh:
+            return json.load(fh)
+    return {}
+
+
+def save_registry(registry: dict) -> None:
+    """Atomically write the registry to disk."""
+    tmp = REGISTRY_FILE.with_suffix(".tmp")
+    with tmp.open("w") as fh:
+        json.dump(registry, fh, indent=2)
+    tmp.replace(REGISTRY_FILE)
+
+
+def download_pdf(pdf_url: str, registry: dict) -> str:
     """
     Download a PDF to the appropriate output path.
+    Checks the registry first; updates it on success.
     Returns one of: 'downloaded', 'skipped', 'failed'.
     """
     dest = output_path_for(pdf_url)
 
+    if SKIP_EXISTING and pdf_url in registry:
+        print(f"    [SKIP] {registry[pdf_url]['local_filename']} (in registry)")
+        return "skipped"
+
     if SKIP_EXISTING and dest.exists():
-        print(f"    [SKIP] {dest.relative_to(OUTPUT_DIR)}")
+        local_filename = str(dest.relative_to(OUTPUT_DIR))
+        print(f"    [SKIP] {local_filename} (file exists)")
+        # Backfill registry so future runs skip via registry lookup
+        if pdf_url not in registry:
+            mtime = datetime.fromtimestamp(dest.stat().st_mtime, tz=timezone.utc)
+            registry[pdf_url] = {
+                "url": pdf_url,
+                "website": parse_domain(pdf_url),
+                "date_downloaded": mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "local_filename": local_filename,
+            }
+            save_registry(registry)
         return "skipped"
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -134,7 +171,17 @@ def download_pdf(pdf_url: str) -> str:
         with dest.open("wb") as fh:
             for chunk in resp.iter_content(chunk_size=16_384):
                 fh.write(chunk)
-        print(f"    [OK]   {dest.relative_to(OUTPUT_DIR)}")
+
+        local_filename = str(dest.relative_to(OUTPUT_DIR))
+        registry[pdf_url] = {
+            "url": pdf_url,
+            "website": parse_domain(pdf_url),
+            "date_downloaded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "local_filename": local_filename,
+        }
+        save_registry(registry)
+
+        print(f"    [OK]   {local_filename}")
         return "downloaded"
     except requests.RequestException as exc:
         print(f"    [FAIL] {pdf_url}: {exc}")
@@ -149,13 +196,13 @@ def download_pdf(pdf_url: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def scrape_seed(seed_url: str) -> dict[str, int]:
+def scrape_seed(seed_url: str, registry: dict) -> dict[str, int]:
     """
     Scrape one seed URL.
     1. Fetch seed page, collect PDFs + same-domain page links.
     2. Optionally restrict page links to the same path prefix.
     3. Visit each qualifying page link, collect more PDFs.
-    4. Download all unique PDFs.
+    4. Download all unique PDFs (skipping those already in registry).
 
     Returns a dict with counts: downloaded, skipped, failed.
     """
@@ -208,7 +255,7 @@ def scrape_seed(seed_url: str) -> dict[str, int]:
     # --- Step 4: download ---
     for pdf_url in sorted(all_pdfs):
         time.sleep(DELAY)
-        result = download_pdf(pdf_url)
+        result = download_pdf(pdf_url, registry)
         counts[result] += 1
 
     return counts
@@ -220,10 +267,13 @@ def scrape_seed(seed_url: str) -> dict[str, int]:
 
 
 def main() -> None:
+    registry = load_registry()
+
     print("PDF Scraper")
     print(f"  Config       : {CONFIG_FILE}")
     print(f"  Source URLs  : {URLS_FILE} ({len(source_urls)} URL(s))")
     print(f"  Output dir   : {OUTPUT_DIR}")
+    print(f"  Registry     : {REGISTRY_FILE} ({len(registry)} entries)")
     print(f"  Delay        : {DELAY}s between requests")
     print(f"  Skip existing: {SKIP_EXISTING}")
 
@@ -231,7 +281,7 @@ def main() -> None:
 
     totals = {"downloaded": 0, "skipped": 0, "failed": 0}
     for url in source_urls:
-        result = scrape_seed(url)
+        result = scrape_seed(url, registry)
         for key in totals:
             totals[key] += result[key]
 

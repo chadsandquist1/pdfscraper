@@ -1,6 +1,9 @@
 # Downloaded PDFs
 downloaded/
 
+# Download registry (local state, not for version control)
+downloaded.json
+
 # Python virtual environment
 .venv/
 venv/
