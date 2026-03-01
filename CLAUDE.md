@@ -92,3 +92,7 @@ python backfill_registry.py
 ## Dependencies
 - `requests` — HTTP downloads
 - `beautifulsoup4` + `lxml` — HTML parsing for link extraction
+
+## IMPORTANT
+
+- make sure you don't even check into git any sensitve information like passwords or terraform state files.
