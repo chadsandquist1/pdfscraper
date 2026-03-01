@@ -36,7 +36,10 @@ source .venv/bin/activate        # macOS / Linux
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run the scraper
+# 3. Install the Playwright browser (one-time, needed for JS-rendered sites)
+playwright install chromium
+
+# 4. Run the scraper
 python scraper.py
 ```
 

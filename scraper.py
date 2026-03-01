@@ -71,7 +71,7 @@ def is_pdf_link(url: str) -> bool:
 
 
 def fetch_page(url: str) -> BeautifulSoup | None:
-    """Fetch a URL and return a BeautifulSoup object, or None on error."""
+    """Fetch a URL via requests and return a BeautifulSoup object, or None on error."""
     try:
         resp = SESSION.get(url, timeout=30)
         resp.raise_for_status()
@@ -79,6 +79,46 @@ def fetch_page(url: str) -> BeautifulSoup | None:
     except requests.RequestException as exc:
         print(f"    [WARN] Could not fetch {url}: {exc}")
         return None
+
+
+def fetch_page_playwright(url: str) -> BeautifulSoup | None:
+    """Render a page using headless Chromium (Playwright) and return parsed HTML."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("    [WARN] Playwright not installed.")
+        print("           Run: pip install playwright && playwright install chromium")
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=USER_AGENT)
+            page = context.new_page()
+            page.goto(url, wait_until="load", timeout=30_000)
+            page.wait_for_timeout(3_000)  # allow JS to finish rendering
+            html = page.content()
+            browser.close()
+        return BeautifulSoup(html, "lxml")
+    except Exception as exc:
+        print(f"    [WARN] Playwright could not fetch {url}: {exc}")
+        return None
+
+
+def fetch_page_auto(url: str) -> BeautifulSoup | None:
+    """
+    Fetch a URL using requests. If the response contains no anchor tags
+    (indicating a JS-rendered or bot-protected page), automatically retry
+    using headless Chromium via Playwright.
+    """
+    soup = fetch_page(url)
+    if soup is None:
+        return None
+    if not soup.find("a", href=True):
+        print(f"    [INFO] No links via requests — retrying with Playwright...")
+        pw_soup = fetch_page_playwright(url)
+        if pw_soup is not None:
+            return pw_soup
+    return soup
 
 
 def collect_links(soup: BeautifulSoup, base_url: str) -> tuple[set[str], set[str]]:
@@ -217,8 +257,8 @@ def scrape_seed(seed_url: str, registry: dict) -> dict[str, int]:
         print(f"Path scope: {seed_path_prefix}*")
     print(f"{'='*70}")
 
-    # --- Step 1: fetch seed page ---
-    soup = fetch_page(seed_url)
+    # --- Step 1: fetch seed page (with Playwright fallback) ---
+    soup = fetch_page_auto(seed_url)
     if soup is None:
         print("  Could not fetch seed page. Skipping.")
         return counts
@@ -242,7 +282,7 @@ def scrape_seed(seed_url: str, registry: dict) -> dict[str, int]:
     for i, page_url in enumerate(sorted(pages_to_visit), start=1):
         time.sleep(DELAY)
         print(f"\n  [{i}/{len(pages_to_visit)}] {page_url}")
-        sub_soup = fetch_page(page_url)
+        sub_soup = fetch_page_auto(page_url)
         if sub_soup is None:
             continue
         sub_pdfs, _ = collect_links(sub_soup, page_url)

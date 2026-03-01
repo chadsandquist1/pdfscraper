@@ -70,6 +70,7 @@ Nested registry keyed by domain then URL:
 # First time setup
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+playwright install chromium   # one-time: installs headless browser
 
 # Run the scraper
 python scraper.py
@@ -89,9 +90,13 @@ python backfill_registry.py
 - `downloaded.json` — local machine state, regeneratable via `backfill_registry.py`
 - `.venv/` — Python virtual environment
 
+## Playwright fallback
+`fetch_page_auto()` tries `requests` first. If the response contains zero `<a href>` tags (indicating a JS-rendered or bot-protected page), it automatically retries using headless Chromium via Playwright. Playwright is imported lazily — if not installed, requests-only scraping continues normally with a warning.
+
 ## Dependencies
 - `requests` — HTTP downloads
 - `beautifulsoup4` + `lxml` — HTML parsing for link extraction
+- `playwright` — headless Chromium for JS-rendered / bot-protected pages (requires `playwright install chromium` after pip install)
 
 ## IMPORTANT
 
