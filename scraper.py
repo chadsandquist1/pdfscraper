@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""
+PDF Scraper
+-----------
+Downloads all PDFs found on seed URLs and one level of linked sub-pages
+(same domain, same URL path prefix). Settings are read from config.json;
+seed URLs are read from source_urls.json.
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+import requests
+from bs4 import BeautifulSoup
+
+# ---------------------------------------------------------------------------
+# Load configuration
+# ---------------------------------------------------------------------------
+
+CONFIG_FILE = Path("config.json")
+URLS_FILE = Path("source_urls.json")
+
+for required in (CONFIG_FILE, URLS_FILE):
+    if not required.exists():
+        sys.exit(f"Error: required file '{required}' not found.")
+
+with CONFIG_FILE.open() as fh:
+    config = json.load(fh)
+
+with URLS_FILE.open() as fh:
+    source_urls: list[str] = json.load(fh)
+
+OUTPUT_DIR = Path(config.get("output_dir", "downloaded"))
+DELAY = float(config.get("delay_seconds", 1.0))
+SKIP_EXISTING = bool(config.get("skip_existing", True))
+RESTRICT_TO_SEED_PATH = bool(config.get("restrict_to_seed_path", True))
+USER_AGENT = config.get(
+    "user_agent",
+    "Mozilla/5.0 (compatible; PDFScraper/1.0)",
+)
+
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": USER_AGENT})
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_domain(url: str) -> str:
+    return urlparse(url).netloc
+
+
+def parse_path_prefix(url: str) -> str:
+    """Return the directory portion of a URL path (used to scope sub-page crawl)."""
+    parsed = urlparse(url)
+    path = parsed.path
+    if not path.endswith("/"):
+        path = path.rsplit("/", 1)[0] + "/"
+    return path
+
+
+def is_pdf_link(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".pdf")
+
+
+def fetch_page(url: str) -> BeautifulSoup | None:
+    """Fetch a URL and return a BeautifulSoup object, or None on error."""
+    try:
+        resp = SESSION.get(url, timeout=30)
+        resp.raise_for_status()
+        return BeautifulSoup(resp.text, "lxml")
+    except requests.RequestException as exc:
+        print(f"    [WARN] Could not fetch {url}: {exc}")
+        return None
+
+
+def collect_links(soup: BeautifulSoup, base_url: str) -> tuple[set[str], set[str]]:
+    """
+    Return (pdf_links, page_links) found in the soup.
+    All URLs are absolute.
+    """
+    pdf_links: set[str] = set()
+    page_links: set[str] = set()
+
+    for tag in soup.find_all("a", href=True):
+        abs_url = urljoin(base_url, tag["href"].strip())
+        parsed = urlparse(abs_url)
+
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if "#" in abs_url:
+            abs_url = abs_url.split("#")[0]
+        if not abs_url:
+            continue
+
+        if is_pdf_link(abs_url):
+            pdf_links.add(abs_url)
+        else:
+            page_links.add(abs_url)
+
+    return pdf_links, page_links
+
+
+def output_path_for(pdf_url: str) -> Path:
+    """Map a PDF URL to its local download path inside OUTPUT_DIR."""
+    parsed = urlparse(pdf_url)
+    domain = parsed.netloc
+    rel_path = parsed.path.lstrip("/")
+    return OUTPUT_DIR / domain / rel_path
+
+
+def download_pdf(pdf_url: str) -> str:
+    """
+    Download a PDF to the appropriate output path.
+    Returns one of: 'downloaded', 'skipped', 'failed'.
+    """
+    dest = output_path_for(pdf_url)
+
+    if SKIP_EXISTING and dest.exists():
+        print(f"    [SKIP] {dest.relative_to(OUTPUT_DIR)}")
+        return "skipped"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        resp = SESSION.get(pdf_url, stream=True, timeout=60)
+        resp.raise_for_status()
+        with dest.open("wb") as fh:
+            for chunk in resp.iter_content(chunk_size=16_384):
+                fh.write(chunk)
+        print(f"    [OK]   {dest.relative_to(OUTPUT_DIR)}")
+        return "downloaded"
+    except requests.RequestException as exc:
+        print(f"    [FAIL] {pdf_url}: {exc}")
+        # Remove partial file if it was created
+        if dest.exists():
+            dest.unlink()
+        return "failed"
+
+
+# ---------------------------------------------------------------------------
+# Core scrape logic
+# ---------------------------------------------------------------------------
+
+
+def scrape_seed(seed_url: str) -> dict[str, int]:
+    """
+    Scrape one seed URL.
+    1. Fetch seed page, collect PDFs + same-domain page links.
+    2. Optionally restrict page links to the same path prefix.
+    3. Visit each qualifying page link, collect more PDFs.
+    4. Download all unique PDFs.
+
+    Returns a dict with counts: downloaded, skipped, failed.
+    """
+    domain = parse_domain(seed_url)
+    seed_path_prefix = parse_path_prefix(seed_url)
+    counts = {"downloaded": 0, "skipped": 0, "failed": 0}
+
+    print(f"\n{'='*70}")
+    print(f"Seed URL : {seed_url}")
+    print(f"Domain   : {domain}")
+    if RESTRICT_TO_SEED_PATH:
+        print(f"Path scope: {seed_path_prefix}*")
+    print(f"{'='*70}")
+
+    # --- Step 1: fetch seed page ---
+    soup = fetch_page(seed_url)
+    if soup is None:
+        print("  Could not fetch seed page. Skipping.")
+        return counts
+
+    seed_pdfs, seed_pages = collect_links(soup, seed_url)
+    print(f"  Seed page  -> {len(seed_pdfs)} PDF link(s), {len(seed_pages)} page link(s)")
+
+    # --- Step 2: filter page links to follow ---
+    def should_follow(url: str) -> bool:
+        if parse_domain(url) != domain:
+            return False
+        if RESTRICT_TO_SEED_PATH:
+            return urlparse(url).path.startswith(seed_path_prefix)
+        return True
+
+    pages_to_visit = {url for url in seed_pages if should_follow(url)}
+    print(f"  Sub-pages to visit: {len(pages_to_visit)}")
+
+    # --- Step 3: visit each sub-page ---
+    all_pdfs: set[str] = set(seed_pdfs)
+    for i, page_url in enumerate(sorted(pages_to_visit), start=1):
+        time.sleep(DELAY)
+        print(f"\n  [{i}/{len(pages_to_visit)}] {page_url}")
+        sub_soup = fetch_page(page_url)
+        if sub_soup is None:
+            continue
+        sub_pdfs, _ = collect_links(sub_soup, page_url)
+        if sub_pdfs:
+            print(f"    Found {len(sub_pdfs)} PDF(s)")
+        all_pdfs.update(sub_pdfs)
+
+    print(f"\n  Total unique PDFs: {len(all_pdfs)}")
+
+    # --- Step 4: download ---
+    for pdf_url in sorted(all_pdfs):
+        time.sleep(DELAY)
+        result = download_pdf(pdf_url)
+        counts[result] += 1
+
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    print("PDF Scraper")
+    print(f"  Config       : {CONFIG_FILE}")
+    print(f"  Source URLs  : {URLS_FILE} ({len(source_urls)} URL(s))")
+    print(f"  Output dir   : {OUTPUT_DIR}")
+    print(f"  Delay        : {DELAY}s between requests")
+    print(f"  Skip existing: {SKIP_EXISTING}")
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    totals = {"downloaded": 0, "skipped": 0, "failed": 0}
+    for url in source_urls:
+        result = scrape_seed(url)
+        for key in totals:
+            totals[key] += result[key]
+
+    print(f"\n{'='*70}")
+    print("Run complete.")
+    print(f"  Downloaded : {totals['downloaded']}")
+    print(f"  Skipped    : {totals['skipped']}")
+    print(f"  Failed     : {totals['failed']}")
+    print(f"  Output dir : {OUTPUT_DIR.resolve()}")
+
+
+if __name__ == "__main__":
+    main()

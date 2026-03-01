@@ -1,0 +1,7 @@
+{
+  "output_dir": "downloaded",
+  "delay_seconds": 1.0,
+  "skip_existing": true,
+  "restrict_to_seed_path": true,
+  "user_agent": "Mozilla/5.0 (compatible; PDFScraper/1.0; +https://github.com/your-repo)"
+}
