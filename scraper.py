@@ -82,15 +82,20 @@ def fetch_page(url: str) -> BeautifulSoup | None:
 
 
 def fetch_page_playwright(url: str) -> BeautifulSoup | None:
-    """Render a page using headless Chromium (Playwright) and return parsed HTML."""
+    """
+    Render a page using headless Chromium with stealth patches applied.
+    playwright-stealth hides automation indicators (navigator.webdriver,
+    missing plugins, etc.) to bypass bot-detection systems like Radware.
+    """
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("    [WARN] Playwright not installed.")
-        print("           Run: pip install playwright && playwright install chromium")
+        from playwright_stealth import Stealth
+    except ImportError as exc:
+        print(f"    [WARN] Missing dependency: {exc}")
+        print("           Run: pip install playwright playwright-stealth && playwright install chromium")
         return None
     try:
-        with sync_playwright() as p:
+        with Stealth().use_sync(sync_playwright()) as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(user_agent=USER_AGENT)
             page = context.new_page()
