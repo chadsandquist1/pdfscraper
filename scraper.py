@@ -120,12 +120,32 @@ def output_path_for(pdf_url: str) -> Path:
 # Download registry  (downloaded.json)
 # ---------------------------------------------------------------------------
 
+def _migrate_registry(old: dict) -> dict:
+    """Convert flat {url: entry} registry to nested {domain: {url: entry}}."""
+    new: dict = {}
+    for url, entry in old.items():
+        domain = entry.get("website") or parse_domain(url)
+        new_entry = {k: v for k, v in entry.items() if k != "website"}
+        new.setdefault(domain, {})[url] = new_entry
+    return new
+
+
 def load_registry() -> dict:
-    """Load the download registry from disk. Returns a dict keyed by URL."""
-    if REGISTRY_FILE.exists():
-        with REGISTRY_FILE.open() as fh:
-            return json.load(fh)
-    return {}
+    """
+    Load the download registry from disk.
+    Auto-migrates from the old flat {url: entry} format if needed.
+    Returns a nested dict: {domain: {url: entry}}.
+    """
+    if not REGISTRY_FILE.exists():
+        return {}
+    with REGISTRY_FILE.open() as fh:
+        data = json.load(fh)
+    # Detect old flat format: top-level keys are URLs, not domain names
+    if data and next(iter(data)).startswith("http"):
+        print("  [INFO] Migrating registry to domain-grouped format...")
+        data = _migrate_registry(data)
+        save_registry(data)
+    return data
 
 
 def save_registry(registry: dict) -> None:
@@ -142,21 +162,22 @@ def download_pdf(pdf_url: str, registry: dict) -> str:
     Checks the registry first; updates it on success.
     Returns one of: 'downloaded', 'skipped', 'failed'.
     """
+    domain = parse_domain(pdf_url)
+    domain_entries = registry.get(domain, {})
     dest = output_path_for(pdf_url)
 
-    if SKIP_EXISTING and pdf_url in registry:
-        print(f"    [SKIP] {registry[pdf_url]['local_filename']} (in registry)")
+    if SKIP_EXISTING and pdf_url in domain_entries:
+        print(f"    [SKIP] {domain_entries[pdf_url]['local_filename']} (in registry)")
         return "skipped"
 
     if SKIP_EXISTING and dest.exists():
         local_filename = str(dest.relative_to(OUTPUT_DIR))
         print(f"    [SKIP] {local_filename} (file exists)")
         # Backfill registry so future runs skip via registry lookup
-        if pdf_url not in registry:
+        if pdf_url not in domain_entries:
             mtime = datetime.fromtimestamp(dest.stat().st_mtime, tz=timezone.utc)
-            registry[pdf_url] = {
+            registry.setdefault(domain, {})[pdf_url] = {
                 "url": pdf_url,
-                "website": parse_domain(pdf_url),
                 "date_downloaded": mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "local_filename": local_filename,
             }
@@ -173,9 +194,8 @@ def download_pdf(pdf_url: str, registry: dict) -> str:
                 fh.write(chunk)
 
         local_filename = str(dest.relative_to(OUTPUT_DIR))
-        registry[pdf_url] = {
+        registry.setdefault(domain, {})[pdf_url] = {
             "url": pdf_url,
-            "website": parse_domain(pdf_url),
             "date_downloaded": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "local_filename": local_filename,
         }
@@ -273,7 +293,8 @@ def main() -> None:
     print(f"  Config       : {CONFIG_FILE}")
     print(f"  Source URLs  : {URLS_FILE} ({len(source_urls)} URL(s))")
     print(f"  Output dir   : {OUTPUT_DIR}")
-    print(f"  Registry     : {REGISTRY_FILE} ({len(registry)} entries)")
+    total_entries = sum(len(v) for v in registry.values())
+    print(f"  Registry     : {REGISTRY_FILE} ({len(registry)} domain(s), {total_entries} entries)")
     print(f"  Delay        : {DELAY}s between requests")
     print(f"  Skip existing: {SKIP_EXISTING}")
 
