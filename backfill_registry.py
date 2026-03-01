@@ -7,8 +7,7 @@ reconstructing each file's original URL from its local path.
 
 Registry format: { "<domain>": { "<url>": { url, date_downloaded, local_filename } } }
 
-If an existing downloaded.json is in the old flat format it is migrated
-automatically. Safe to run multiple times — existing entries are preserved.
+Safe to run multiple times — existing entries are preserved.
 """
 
 import json
@@ -30,26 +29,11 @@ OUTPUT_DIR = Path(config.get("output_dir", "downloaded"))
 if not OUTPUT_DIR.exists():
     sys.exit(f"Error: output directory '{OUTPUT_DIR}' does not exist.")
 
-
-def load_existing() -> dict:
-    """Load and migrate existing registry if present."""
-    if not REGISTRY_FILE.exists():
-        return {}
+registry: dict = {}
+if REGISTRY_FILE.exists():
     with REGISTRY_FILE.open() as fh:
-        data = json.load(fh)
-    # Detect old flat format: top-level keys are URLs, not domain names
-    if data and next(iter(data)).startswith("http"):
-        print("Migrating existing registry to domain-grouped format...")
-        migrated: dict = {}
-        for url, entry in data.items():
-            domain = entry.get("website") or url.split("/")[2]
-            new_entry = {k: v for k, v in entry.items() if k != "website"}
-            migrated.setdefault(domain, {})[url] = new_entry
-        return migrated
-    return data
+        registry = json.load(fh)
 
-
-registry = load_existing()
 pre_existing = sum(len(v) for v in registry.values())
 added = 0
 

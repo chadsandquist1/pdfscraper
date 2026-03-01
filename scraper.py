@@ -120,32 +120,12 @@ def output_path_for(pdf_url: str) -> Path:
 # Download registry  (downloaded.json)
 # ---------------------------------------------------------------------------
 
-def _migrate_registry(old: dict) -> dict:
-    """Convert flat {url: entry} registry to nested {domain: {url: entry}}."""
-    new: dict = {}
-    for url, entry in old.items():
-        domain = entry.get("website") or parse_domain(url)
-        new_entry = {k: v for k, v in entry.items() if k != "website"}
-        new.setdefault(domain, {})[url] = new_entry
-    return new
-
-
 def load_registry() -> dict:
-    """
-    Load the download registry from disk.
-    Auto-migrates from the old flat {url: entry} format if needed.
-    Returns a nested dict: {domain: {url: entry}}.
-    """
+    """Load the registry from disk. Returns {domain: {url: entry}}."""
     if not REGISTRY_FILE.exists():
         return {}
     with REGISTRY_FILE.open() as fh:
-        data = json.load(fh)
-    # Detect old flat format: top-level keys are URLs, not domain names
-    if data and next(iter(data)).startswith("http"):
-        print("  [INFO] Migrating registry to domain-grouped format...")
-        data = _migrate_registry(data)
-        save_registry(data)
-    return data
+        return json.load(fh)
 
 
 def save_registry(registry: dict) -> None:
