@@ -7,6 +7,7 @@ Downloads all PDFs found on seed URLs and one level of linked sub-pages
 seed URLs are read from source_urls.json.
 """
 
+import itertools
 import json
 import sys
 import time
@@ -33,7 +34,13 @@ with CONFIG_FILE.open() as fh:
     config = json.load(fh)
 
 with URLS_FILE.open() as fh:
-    source_urls: list[str] = json.load(fh)
+    _raw_urls = json.load(fh)
+
+# Normalize: plain strings become {"url": "..."}, objects are passed through
+source_urls: list[dict] = [
+    entry if isinstance(entry, dict) else {"url": entry}
+    for entry in _raw_urls
+]
 
 OUTPUT_DIR = Path(config.get("output_dir", "downloaded"))
 DELAY = float(config.get("delay_seconds", 1.0))
@@ -241,63 +248,105 @@ def download_pdf(pdf_url: str, registry: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def scrape_seed(seed_url: str, registry: dict) -> dict[str, int]:
+def collect_paginated_pdfs(base_url: str, pagination: dict) -> set[str]:
     """
-    Scrape one seed URL.
-    1. Fetch seed page, collect PDFs + same-domain page links.
-    2. Optionally restrict page links to the same path prefix.
-    3. Visit each qualifying page link, collect more PDFs.
-    4. Download all unique PDFs (skipping those already in registry).
+    Navigate through a paginated SPA by substituting {page} in the URL
+    pattern, collecting PDFs from each page until a page yields no new ones.
+    Always uses Playwright since paginated sites are JS-rendered.
+    """
+    pattern = pagination["pattern"]
+    start_page = int(pagination.get("start_page", 1))
+    all_pdfs: set[str] = set()
+
+    for page_num in itertools.count(start_page):
+        page_url = base_url + pattern.replace("{page}", str(page_num))
+        print(f"\n  [Page {page_num}] {page_url}")
+        time.sleep(DELAY)
+
+        soup = fetch_page_playwright(page_url)
+        if soup is None:
+            print(f"    Could not fetch page {page_num}, stopping.")
+            break
+
+        page_pdfs, _ = collect_links(soup, base_url)
+        new_pdfs = page_pdfs - all_pdfs
+        print(f"    {len(page_pdfs)} PDF(s) on page, {len(new_pdfs)} new")
+
+        if not new_pdfs:
+            print("    No new PDFs — pagination complete.")
+            break
+
+        all_pdfs.update(new_pdfs)
+
+    return all_pdfs
+
+
+def scrape_seed(entry: dict, registry: dict) -> dict[str, int]:
+    """
+    Scrape one seed entry.
+
+    If the entry has a 'pagination' key, navigates through paginated pages
+    using collect_paginated_pdfs(). Otherwise uses the standard crawl:
+    fetch seed page + one level of same-domain sub-pages.
 
     Returns a dict with counts: downloaded, skipped, failed.
     """
+    seed_url = entry["url"]
+    pagination = entry.get("pagination")
     domain = parse_domain(seed_url)
-    seed_path_prefix = parse_path_prefix(seed_url)
     counts = {"downloaded": 0, "skipped": 0, "failed": 0}
 
     print(f"\n{'='*70}")
     print(f"Seed URL : {seed_url}")
     print(f"Domain   : {domain}")
-    if RESTRICT_TO_SEED_PATH:
-        print(f"Path scope: {seed_path_prefix}*")
+    if pagination:
+        print(f"Pagination: {pagination['type']}, start page {pagination.get('start_page', 1)}")
+    elif RESTRICT_TO_SEED_PATH:
+        print(f"Path scope: {parse_path_prefix(seed_url)}*")
     print(f"{'='*70}")
 
-    # --- Step 1: fetch seed page (with Playwright fallback) ---
-    soup = fetch_page_auto(seed_url)
-    if soup is None:
-        print("  Could not fetch seed page. Skipping.")
-        return counts
+    if pagination:
+        # --- Paginated SPA ---
+        all_pdfs = collect_paginated_pdfs(seed_url, pagination)
+        print(f"\n  Total unique PDFs: {len(all_pdfs)}")
 
-    seed_pdfs, seed_pages = collect_links(soup, seed_url)
-    print(f"  Seed page  -> {len(seed_pdfs)} PDF link(s), {len(seed_pages)} page link(s)")
+    else:
+        # --- Standard crawl: seed page + one level of sub-pages ---
+        seed_path_prefix = parse_path_prefix(seed_url)
 
-    # --- Step 2: filter page links to follow ---
-    def should_follow(url: str) -> bool:
-        if parse_domain(url) != domain:
-            return False
-        if RESTRICT_TO_SEED_PATH:
-            return urlparse(url).path.startswith(seed_path_prefix)
-        return True
+        soup = fetch_page_auto(seed_url)
+        if soup is None:
+            print("  Could not fetch seed page. Skipping.")
+            return counts
 
-    pages_to_visit = {url for url in seed_pages if should_follow(url)}
-    print(f"  Sub-pages to visit: {len(pages_to_visit)}")
+        seed_pdfs, seed_pages = collect_links(soup, seed_url)
+        print(f"  Seed page  -> {len(seed_pdfs)} PDF link(s), {len(seed_pages)} page link(s)")
 
-    # --- Step 3: visit each sub-page ---
-    all_pdfs: set[str] = set(seed_pdfs)
-    for i, page_url in enumerate(sorted(pages_to_visit), start=1):
-        time.sleep(DELAY)
-        print(f"\n  [{i}/{len(pages_to_visit)}] {page_url}")
-        sub_soup = fetch_page_auto(page_url)
-        if sub_soup is None:
-            continue
-        sub_pdfs, _ = collect_links(sub_soup, page_url)
-        if sub_pdfs:
-            print(f"    Found {len(sub_pdfs)} PDF(s)")
-        all_pdfs.update(sub_pdfs)
+        def should_follow(url: str) -> bool:
+            if parse_domain(url) != domain:
+                return False
+            if RESTRICT_TO_SEED_PATH:
+                return urlparse(url).path.startswith(seed_path_prefix)
+            return True
 
-    print(f"\n  Total unique PDFs: {len(all_pdfs)}")
+        pages_to_visit = {url for url in seed_pages if should_follow(url)}
+        print(f"  Sub-pages to visit: {len(pages_to_visit)}")
 
-    # --- Step 4: download ---
+        all_pdfs: set[str] = set(seed_pdfs)
+        for i, page_url in enumerate(sorted(pages_to_visit), start=1):
+            time.sleep(DELAY)
+            print(f"\n  [{i}/{len(pages_to_visit)}] {page_url}")
+            sub_soup = fetch_page_auto(page_url)
+            if sub_soup is None:
+                continue
+            sub_pdfs, _ = collect_links(sub_soup, page_url)
+            if sub_pdfs:
+                print(f"    Found {len(sub_pdfs)} PDF(s)")
+            all_pdfs.update(sub_pdfs)
+
+        print(f"\n  Total unique PDFs: {len(all_pdfs)}")
+
+    # --- Download ---
     for pdf_url in sorted(all_pdfs):
         time.sleep(DELAY)
         result = download_pdf(pdf_url, registry)
@@ -326,8 +375,8 @@ def main() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     totals = {"downloaded": 0, "skipped": 0, "failed": 0}
-    for url in source_urls:
-        result = scrape_seed(url, registry)
+    for entry in source_urls:
+        result = scrape_seed(entry, registry)
         for key in totals:
             totals[key] += result[key]
 

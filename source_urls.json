@@ -1,5 +1,11 @@
 [
   "https://insurance.delaware.gov/information/bulletins/",
-  "https://mn.gov/commerce/insurance/industry/bulletins/"
-
+  {
+    "url": "https://mn.gov/commerce/insurance/industry/bulletins/",
+    "pagination": {
+      "type": "hash_fragment",
+      "pattern": "#/list/appId/2/filterType//filterValue//page/{page}/sort/Date/order/ascending",
+      "start_page": 1
+    }
+  }
 ]
